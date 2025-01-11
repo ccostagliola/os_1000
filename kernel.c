@@ -34,6 +34,9 @@ void kernel_main(void) {
 
     memset(__bss, 0, (size_t) __bss_end - (size_t) __bss);
 
+    PANIC("booted!");
+    printf("unreachable here!\n");
+
     printf("\n\nHello %s\n", "World!");
     printf("1 + 2 = %d, %x\n", 1 + 2, 0x1234abcd);
     for (;;) {
