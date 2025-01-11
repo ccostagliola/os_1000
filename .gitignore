@@ -50,3 +50,14 @@ modules.order
 Module.symvers
 Mkfile.old
 dkms.conf
+
+# Project specific
+/disk/*
+!/disk/.gitkeep
+*.map
+*.tar
+*.o
+*.elf
+*.bin
+*.log
+*.pcap
