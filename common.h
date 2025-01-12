@@ -1,6 +1,8 @@
 #ifndef _COMMON_H_
 #define _COMMON_H_
 
+#define PAGE_SIZE 4096
+
 typedef int bool;
 typedef unsigned char uint8_t;
 typedef unsigned short uint16_t;
