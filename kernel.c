@@ -80,6 +80,12 @@ void yield(void) {
     if (next == current_proc)
         return;
 
+    __asm__ __volatile__(
+        "csrw sscratch, %[sscratch]\n"
+        :
+        : [sscratch] "r" ((uint32_t) &next->stack[sizeof(next->stack)])
+    );
+
     // Context switch
     struct process *prev = current_proc;
     current_proc = next;
@@ -154,8 +160,11 @@ __attribute__((aligned(4)))
 void kernel_entry(void) {
 
     __asm__ __volatile__(
-        "csrw sscratch, sp\n"       // Saves the stack pointer in the CSR(sscratch)
+        // Retrieve the kernel stack of the running process from sscratch.
+        "csrrw sp, sscratch, sp\n"  // Swaps the stack pointer in the CSR(sscratch) with sp
+
         "addi sp, sp, -4 * 31\n"    // Pushes 31 words in the stack
+
         "sw ra,  4 * 0(sp)\n"       // This and the next sw instructions
         "sw gp,  4 * 1(sp)\n"       // save the registers into the 31 consecutive words
         "sw tp,  4 * 2(sp)\n"       // from the stack
@@ -187,8 +196,13 @@ void kernel_entry(void) {
         "sw s10, 4 * 28(sp)\n"
         "sw s11, 4 * 29(sp)\n"
 
-        "csrr a0, sscratch\n"       // Reads CSR(sscratch) into a0
-        "sw a0, 4 * 30(sp)\n"       // Saves the value (the value of the SP before calling this function)
+        // Retrieve and save the sp at the time of exception.
+        "csrr a0, sscratch\n"
+        "sw a0,  4 * 30(sp)\n"
+
+        // Reset the kernel stack.
+        "addi a0, sp, 4 * 31\n"
+        "csrw sscratch, a0\n"
 
         "mv a0, sp\n"               // a0 = sp
         "call handle_trap\n"        // calls handle_trap(a0). a0 is the first argument of functions according to RISC-V calling convention
