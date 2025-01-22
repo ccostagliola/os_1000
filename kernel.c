@@ -5,22 +5,64 @@
 #define PROC_UNUSED   0   // Unused process control structure
 #define PROC_RUNNABLE 1   // Runnable process
 
+#define SATP_SV32 (1u << 31)
+#define PAGE_V    (1 << 0)   // "Valid" bit (entry is enabled)
+#define PAGE_R    (1 << 1)   // Readable
+#define PAGE_W    (1 << 2)   // Writable
+#define PAGE_X    (1 << 3)   // Executable
+#define PAGE_U    (1 << 4)   // User (accessible in user mode)
+
 typedef unsigned char uint8_t;
 typedef unsigned int uint32_t;
 typedef uint32_t size_t;
 
-extern char __bss[], __bss_end[], __stack_top[], __free_ram[], __free_ram_end[];
+extern char __bss[], __bss_end[], __stack_top[], __free_ram[], __free_ram_end[], __kernel_base[];
 
 struct process {
-    int pid;             // Process ID
-    int state;           // Process state: PROC_UNUSED or PROC_RUNNABLE
-    vaddr_t sp;          // Stack pointer
-    uint8_t stack[8192]; // Kernel stack
+    int pid;                // Process ID
+    int state;              // Process state: PROC_UNUSED or PROC_RUNNABLE
+    vaddr_t sp;             // Stack pointer
+    uint32_t *page_table;   // Page table (1st level)
+    uint8_t stack[8192];    // Kernel stack
 };
 
 struct process procs[PROCS_MAX]; // All process control structures.
 struct process *current_proc; // Currently running process
 struct process *idle_proc;    // Idle process
+
+paddr_t alloc_pages(uint32_t n) {
+
+    static paddr_t next_paddr = (paddr_t) __free_ram;
+    paddr_t paddr = next_paddr;
+    next_paddr += n * PAGE_SIZE;
+
+    if (next_paddr > (paddr_t) __free_ram_end)
+        PANIC("out of memory");
+
+    memset((void *) paddr, 0, n * PAGE_SIZE);
+    return paddr;
+}
+
+void map_page(uint32_t *table1, uint32_t vaddr, paddr_t paddr, uint32_t flags) {
+
+    if (!is_aligned(vaddr, PAGE_SIZE))
+        PANIC("unaligned vaddr %x", vaddr);
+
+    if (!is_aligned(paddr, PAGE_SIZE))
+        PANIC("unaligned paddr %x", paddr);
+
+    uint32_t vpn1 = (vaddr >> 22) & 0x3ff;
+    if ((table1[vpn1] & PAGE_V) == 0) {
+        // Create the non-existent 2nd level page table.
+        uint32_t pt_paddr = alloc_pages(1);
+        table1[vpn1] = ((pt_paddr / PAGE_SIZE) << 10) | PAGE_V;
+    }
+
+    // Set the 2nd level page table entry to map the physical page.
+    uint32_t vpn0 = (vaddr >> 12) & 0x3ff;
+    uint32_t *table0 = (uint32_t *) ((table1[vpn1] >> 10) * PAGE_SIZE);
+    table0[vpn0] = ((paddr / PAGE_SIZE) << 10) | flags | PAGE_V;
+}
 
 __attribute__((naked))
 void switch_context(uint32_t *prev_sp, uint32_t *next_sp) {
@@ -80,15 +122,20 @@ void yield(void) {
     if (next == current_proc)
         return;
 
-    __asm__ __volatile__(
-        "csrw sscratch, %[sscratch]\n"
-        :
-        : [sscratch] "r" ((uint32_t) &next->stack[sizeof(next->stack)])
-    );
-
-    // Context switch
     struct process *prev = current_proc;
     current_proc = next;
+
+    __asm__ __volatile__(
+        "sfence.vma\n"
+        "csrw satp, %[satp]\n"
+        "sfence.vma\n"
+        "csrw sscratch, %[sscratch]\n"
+        :
+        // Don't forget the trailing comma!
+        : [satp] "r" (SATP_SV32 | ((uint32_t) next->page_table / PAGE_SIZE)),
+          [sscratch] "r" ((uint32_t) &next->stack[sizeof(next->stack)])
+    );
+
     switch_context(&prev->sp, &next->sp);
 }
 
@@ -125,24 +172,19 @@ struct process *create_process(uint32_t pc) {
     *--sp = 0;                      // s0
     *--sp = (uint32_t) pc;          // ra
 
+    // Map kernel pages.
+    uint32_t *page_table = (uint32_t *) alloc_pages(1);
+    for (paddr_t paddr = (paddr_t) __kernel_base; paddr < (paddr_t) __free_ram_end;
+            paddr += PAGE_SIZE) {
+        map_page(page_table, paddr, paddr, PAGE_R | PAGE_W | PAGE_X);
+    }
+
     // Initialize fields.
     proc->pid = i + 1;
     proc->state = PROC_RUNNABLE;
     proc->sp = (uint32_t) sp;
+    proc->page_table = page_table;
     return proc;
-}
-
-paddr_t alloc_pages(uint32_t n) {
-
-    static paddr_t next_paddr = (paddr_t) __free_ram;
-    paddr_t paddr = next_paddr;
-    next_paddr += n * PAGE_SIZE;
-
-    if (next_paddr > (paddr_t) __free_ram_end)
-        PANIC("out of memory");
-
-    memset((void *) paddr, 0, n * PAGE_SIZE);
-    return paddr;
 }
 
 void handle_trap(struct trap_frame *f) {
