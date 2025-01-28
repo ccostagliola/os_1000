@@ -4,12 +4,15 @@
 #define PROCS_MAX 8       // Maximum number of processes
 #define PROC_UNUSED   0   // Unused process control structure
 #define PROC_RUNNABLE 1   // Runnable process
+#define PROC_EXITED   2   // Exited process
 
 // The base virtual address of an application image. This needs to match the
 // starting address defined in `user.ld`.
 #define USER_BASE 0x1000000
 
 #define SSTATUS_SPIE (1u << 5)
+
+#define SCAUSE_ECALL 8
 
 #define SATP_SV32 (1u << 31)
 #define PAGE_V    (1u << 0)   // "Valid" bit (entry is enabled)
@@ -159,13 +162,6 @@ void user_entry(void) {
     );
 }
 
-/*
-void user_entry(void) {
-
-    PANIC("not yet implemented");
-}
-*/
-
 struct process *create_process(const void *image, size_t image_size) {
 
     // Find an unused process control structure.
@@ -228,14 +224,73 @@ struct process *create_process(const void *image, size_t image_size) {
     return proc;
 }
 
+struct sbiret sbi_call(long arg0, long arg1, long arg2, long arg3, long arg4,
+                       long arg5, long fid, long eid) {
+    register long a0 __asm__("a0") = arg0;
+    register long a1 __asm__("a1") = arg1;
+    register long a2 __asm__("a2") = arg2;
+    register long a3 __asm__("a3") = arg3;
+    register long a4 __asm__("a4") = arg4;
+    register long a5 __asm__("a5") = arg5;
+    register long a6 __asm__("a6") = fid;
+    register long a7 __asm__("a7") = eid;
+
+    __asm__ __volatile__("ecall"
+                         : "=r"(a0), "=r"(a1)
+                         : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(a4), "r"(a5),
+                           "r"(a6), "r"(a7)
+                         : "memory");
+    return (struct sbiret){.error = a0, .value = a1};
+}
+
+void putchar(char ch) {
+    sbi_call(ch, 0, 0, 0, 0, 0, 0, 1 /* Console Putchar */);
+}
+
+long getchar(void) {
+    struct sbiret ret = sbi_call(0, 0, 0, 0, 0, 0, 0, 2);
+    return ret.error;
+}
+
+void handle_syscall(struct trap_frame *f) {
+    switch (f->a3) {
+        case SYS_PUTCHAR:
+            putchar(f->a0);
+            break;
+        case SYS_GETCHAR:
+            while (1) {
+                long ch = getchar();
+                if (ch >= 0) {
+                    f->a0 = ch;
+                    break;
+                }
+                yield();
+            }
+            break;            
+        case SYS_EXIT:
+            printf("process %d exited\n", current_proc->pid);
+            current_proc->state = PROC_EXITED;
+            yield();
+            PANIC("unreachable");
+        default:
+            PANIC("unexpected syscall a3=%x\n", f->a3);
+    }
+}
+
 void handle_trap(struct trap_frame *f) {
-    #pragma unused(f)
 
     uint32_t scause = READ_CSR(scause);
     uint32_t stval = READ_CSR(stval);
     uint32_t user_pc = READ_CSR(sepc);
 
-    PANIC("unexpected trap scause=%x, stval=%x, sepc=%x\n", scause, stval, user_pc);
+    if (scause == SCAUSE_ECALL) {
+        handle_syscall(f);
+        user_pc += 4;
+    } else {
+        PANIC("unexpected trap scause=%x, stval=%x, sepc=%x\n", scause, stval, user_pc);
+    }
+
+    WRITE_CSR(sepc, user_pc);
 }
 
 __attribute__((naked))
@@ -325,34 +380,12 @@ void kernel_entry(void) {
     );
 }
 
-struct sbiret sbi_call(long arg0, long arg1, long arg2, long arg3, long arg4,
-                       long arg5, long fid, long eid) {
-    register long a0 __asm__("a0") = arg0;
-    register long a1 __asm__("a1") = arg1;
-    register long a2 __asm__("a2") = arg2;
-    register long a3 __asm__("a3") = arg3;
-    register long a4 __asm__("a4") = arg4;
-    register long a5 __asm__("a5") = arg5;
-    register long a6 __asm__("a6") = fid;
-    register long a7 __asm__("a7") = eid;
-
-    __asm__ __volatile__("ecall"
-                         : "=r"(a0), "=r"(a1)
-                         : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(a4), "r"(a5),
-                           "r"(a6), "r"(a7)
-                         : "memory");
-    return (struct sbiret){.error = a0, .value = a1};
-}
-
-void putchar(char ch) {
-    sbi_call(ch, 0, 0, 0, 0, 0, 0, 1 /* Console Putchar */);
-}
-
 void delay(void) {
     for (int i = 0; i < 30000000; i++)
         __asm__ __volatile__("nop"); // do nothing
 }
 
+/*
 struct process *proc_a;
 struct process *proc_b;
 
@@ -373,7 +406,7 @@ void proc_b_entry(void) {
         delay();
     }
 }
-
+*/
 void kernel_main(void) {
 
     memset(__bss, 0, (size_t) __bss_end - (size_t) __bss);
